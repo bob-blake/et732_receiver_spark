@@ -1,22 +1,21 @@
 #include "HttpClient.h"
 
-// name the pins
-int led = D1;
+#define LOGGING   // Enable debug data from serial port
 
-#define LOGGING
+// Define pins
+int pin_led     = D1;
+int pin_data_in = A1;
 
-unsigned int nextTime = 0;    // Next time to contact the server
+// Declare Global HTTP variables
 HttpClient http;
-
-// Set up HTTP headers
+http_request_t request;
+http_response_t response;
 http_header_t headers[] = {
     {   "Content-Type", "text/csv" },
     {   "Connection", "close" },
     {   NULL, NULL }    // Always terminate this with NULL
 };
 
-http_request_t request;
-http_response_t response;
 
 void setup() {
     // Register the Spark functions
@@ -38,7 +37,8 @@ void setup() {
     #endif
 
     // Configure pin I/O
-    pinMode(led, OUTPUT);
+    pinMode(pin_led, OUTPUT);
+    pinMode(pin_data_in, INPUT);
 }
 
 void loop() {
@@ -55,7 +55,7 @@ int sendToBBQSite(String command) {
     comma = command.indexOf(',');
     if(comma < 1 || comma > 4){
         #ifdef LOGGING
-        Serial.println("Comma error.");
+          Serial.println("Comma error.");
         #endif
         return -1;    // Invalid value, return error
     }
@@ -63,7 +63,7 @@ int sendToBBQSite(String command) {
     len = command.length();
     if(len < 3 || len > 9){
         #ifdef LOGGING
-        Serial.println("Length error.");
+          Serial.println("Length error.");
         #endif
         return -1;     // Invalid value, return error
     }
@@ -77,7 +77,7 @@ int sendToBBQSite(String command) {
     request.body = content; // This doesn't seem like the most efficient way to do this
 
     #ifdef LOGGING
-    Serial.println("Data received!");
+      Serial.println("Data received!");
     #endif
 
     http.put(request, response, headers);
