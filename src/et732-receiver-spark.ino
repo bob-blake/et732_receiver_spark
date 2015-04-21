@@ -20,7 +20,6 @@ http_response_t response;
 
 void setup() {
     // Register the Spark functions
-    Spark.function("led", ledControl);
     Spark.function("bbq", sendToBBQSite);
 
     // Set up HTTP variables
