@@ -23,12 +23,29 @@ http_header_t headers[] = {
 #define OOK_PRE_HIGH_MIN  150   // us
 #define OOK_PRE_HIGH_MAX  250   // us
 
+#define NUM_PRE_PULSES  8
+#define NUM_RX_BYTES    13
+#define NUM_RX_NIBBLES  NUM_RX_BYTES * 2
+#define NUM_RX_BITS     NUM_RX_BYTES * 8
+
+#define TMR_TICK    1.62 //us
+#define TWO_T_US    500  //us
+#define T_US        250  //us
+
+#define TWO_T_MIN   375 //2T - 0.5T
+#define TWO_T_MAX   625 //etc
+#define T_MIN       125
+#define T_MAX       375
+
 enum rx_states{
   RX_STATE_IDLE,
   RX_STATE_CHECK_PRE,
+  RX_STATE_SYNC,
   RX_STATE_RECEIVE
 };
 volatile enum rx_states state=RX_STATE_IDLE;
+volatile char rx_data[NUM_RX_BITS];
+volatile int  rx_err=0, rx_done=0;
 
 void setup() {
     // Register the Spark functions
@@ -59,39 +76,57 @@ void setup() {
 }
 
 void loop() {
-
+  if(rx_done){
+    Serial.println("Data!");
+    rx_done = 0;
+  }
+  /*
+  if(state > RX_STATE_IDLE){
+    Serial.print("State: ");
+    Serial.println(state);
+  }
+  if(rx_err > 1){
+    Serial.print("Err: ");
+    Serial.println(rx_err);
+  }*/
 }
 
 // Use state machine here
 // Idle, check preamble, receive data
 void interrupt_ext() {
-  static int counter=0;
+  static int pre_counter=0, bit_counter=0;
   static unsigned long start_time;
   unsigned long now_time, pulse_width;
+  bool  edge, waiting;
 
   digitalWrite(pin_debug,HIGH);
-  now_time = micros(); // Save time immediately for best accuracy
+  now_time = micros(); // Save time  and edge immediately for best accuracy
+  edge = digitalRead(pin_data_in);
+  pulse_width = now_time - start_time;
 
   switch(state){
 
     case RX_STATE_IDLE:
-      if(digitalRead(pin_data_in) == LOW){
-        counter = 0;
+      if(edge == LOW){
+        pre_counter = 0;
+        bit_counter = 0;
+        waiting = 0;
+        rx_err = 0;
+        //rx_done = 0;
         state = RX_STATE_CHECK_PRE;
       }
     break;
 
     case RX_STATE_CHECK_PRE:
-      pulse_width = now_time - start_time;
-
-      if(digitalRead(pin_data_in) == HIGH){ // Low-high transition
+      if(edge == HIGH){ // Low-high transition
         if((pulse_width >= OOK_PRE_LOW_MIN) && (pulse_width <= OOK_PRE_LOW_MAX)){
-          counter++;
-          if(counter == 8){ // We have received the entire preamble
-            state = RX_STATE_RECEIVE;
+          pre_counter++;
+          if(pre_counter == NUM_PRE_PULSES){ // We have received the entire preamble
+            state = RX_STATE_SYNC;
           }
         }
         else{ // Low pulse was too short
+          rx_err = 1;
           state = RX_STATE_IDLE;
         }
       }
@@ -100,16 +135,48 @@ void interrupt_ext() {
           // Do nothing
         }
         else{ // High pulse was too short
+          rx_err = 2;
           state = RX_STATE_IDLE;
         }
       }
     break;
 
+    case RX_STATE_SYNC:
+      if((pulse_width >= TWO_T_MIN) && (pulse_width <= TWO_T_MAX)){  // Wait for 2T to start counting
+        rx_data[bit_counter] = edge;
+        bit_counter++;
+        state = RX_STATE_RECEIVE;
+      }
+    break;
+
     case RX_STATE_RECEIVE:
-      #ifdef LOGGING
-        Serial.println("Data!");
-      #endif
-      state = RX_STATE_IDLE;
+      if((pulse_width >= T_MIN) && (pulse_width <= T_MAX)){ // If T
+        if(!waiting){
+          waiting = 1;  // Wait to capture next edge, make sure this is also T
+        }
+        else{
+          rx_data[bit_counter] = rx_data[bit_counter - 1];  // Bit stays the same
+          waiting = 0;
+          bit_counter++;
+        }
+      }
+      else if((pulse_width >= TWO_T_MIN) && (pulse_width <= TWO_T_MAX)){
+        if(waiting){  // Only one consecutive T means an error, reset
+          rx_err = 3;
+          state = RX_STATE_IDLE;
+        }
+        // 2T means the bit changes
+        if(rx_data[bit_counter - 1] == 0)
+          rx_data[bit_counter] = 1;
+        else
+          rx_data[bit_counter] = 0;
+
+        bit_counter++;
+      }
+      if(bit_counter >= NUM_RX_BITS){ // Full message received
+        rx_done = 1;            // Maybe add something to protect data array against new data coming in quickly
+        state = RX_STATE_IDLE;
+      }
     break;
   }
 
