@@ -40,9 +40,23 @@ enum rx_states{
   RX_STATE_PREAMBLE,
   RX_STATE_RECEIVE
 };
-volatile enum rx_states state=RX_STATE_IDLE;
-volatile char rx_data[NUM_RX_BITS];
+
+enum pulse_width{
+  SHORT,
+  ONE_T,
+  TWO_T,
+  TWENTY_T,
+  LONG
+};
+
+struct rx_pulse {
+  pulse_width width;
+  bool        edge;
+};
+
 volatile int  rx_err=0, rx_done=0;
+char message[NUM_RX_BITS];
+
 
 void setup() {
     // Register the Spark functions
@@ -74,13 +88,34 @@ void setup() {
 
 void loop() {
   unsigned int i;
+  char msg_parsed[NUM_RX_NIBBLES];
+  signed int celsius;
+  signed int probe1, probe2;
+
   #ifdef LOGGING
     if(rx_done){
-      Serial.print("Data: ");
-      for(i=0;i<sizeof(rx_data);i++){
-        Serial.print(rx_data[i],DEC);
+      Serial.print("Raw Data: ");
+      for(i=0;i<sizeof(message);i++){
+        Serial.print(message[i],DEC);
       }
       Serial.print("\r\n");
+
+      parse_binary_data(message,msg_parsed);
+      probe1 = calc_probe_temp(1,msg_parsed);
+      probe2 = calc_probe_temp(2,msg_parsed);
+
+      Serial.print("Parsed Data: ");
+      for(i=0;i<sizeof(msg_parsed);i++){
+        Serial.print(msg_parsed[i],HEX);
+      }
+      Serial.print("\r\n");
+
+      Serial.print("Temp 1: ");
+      Serial.print(probe1,DEC);
+      Serial.print("    Temp 2: ");
+      Serial.print(probe2,DEC);
+      Serial.print("\r\n\r\n");
+
       rx_done = 0;
     }
 
@@ -92,25 +127,66 @@ void loop() {
   #endif
 }
 
+//Calculate probe temperature in celsius
+signed int calc_probe_temp(char which_probe, char *rx_parsed)
+{
+    int i, offset, probe_temp;
+    unsigned char   rx_quart[5];
 
-enum pulse_width{
-  SHORT,
-  ONE_T,
-  TWO_T,
-  TWENTY_T,
-  LONG
-};
+    if(which_probe == 1)
+        offset = 8;
+    else
+        offset = 13;
 
-struct rx_pulse {
-  pulse_width width;
-  bool        edge;
-};
+    //Parse data to quaternary
+    for(i=0;i<5;i++){
+        switch(rx_parsed[i+offset]){
+            case 0x05:
+                rx_quart[i] = 0;
+            break;
+            case 0x06:
+                rx_quart[i] = 1;
+            break;
+            case 0x09:
+                rx_quart[i] = 2;
+            break;
+            case 0x0A:
+                rx_quart[i] = 3;
+            break;
+        }
+    }
+    probe_temp = 0;
+    probe_temp += rx_quart[0] * 256;
+    probe_temp += rx_quart[1] * 64;
+    probe_temp += rx_quart[2] * 16;
+    probe_temp += rx_quart[3] * 4;
+    probe_temp += rx_quart[4] * 1;
+    probe_temp -= 532;
+    return probe_temp;
+}
+
+void parse_binary_data(char *binary_in, char *hex_out)
+{
+    int i,j;
+    unsigned char temp;
+    // Parse binary data into hex nibbles (stored inefficiently in bytes)
+    for(i=0;i<NUM_RX_NIBBLES;i++){
+        hex_out[i]=0; //initialize to 0
+        for(j=0;j<4;j++){
+            hex_out[i] <<= 1;
+            temp = binary_in[(i*4)+j];
+            hex_out[i] = hex_out[i] | temp;
+        }
+    }
+}
 
 void interrupt_ext() {
-  volatile static int bit_cntr=0, waiting=0;
-  volatile static unsigned long start_time=0;
-  volatile unsigned long now_time, pulse_time;
-  volatile struct rx_pulse pulse;
+  static enum rx_states state=RX_STATE_IDLE;
+  static int bit_cntr=0, waiting=0;
+  static unsigned long start_time=0;
+  unsigned long now_time, pulse_time;
+  struct rx_pulse pulse;
+  static char rx_data[NUM_RX_BITS];
 
   // Mark time and read edge immediately for best accuracy
   now_time = micros();
@@ -188,7 +264,7 @@ void interrupt_ext() {
 
       if(bit_cntr >= NUM_RX_BITS){ // Full message received
         rx_done = 1;
-        // TODO: Copy array to an intermediate location for decoding
+        memcpy(&message,&rx_data,sizeof(rx_data));
         state = RX_STATE_IDLE;
       }
     break;
