@@ -19,26 +19,21 @@ http_header_t headers[] = {
 };
 
 // Defines and variables for decoding OOK/Manchester data
-#define OOK_PRE_LOW_MIN   4500  // us
-#define OOK_PRE_LOW_MAX   5500  // us
-#define OOK_PRE_HIGH_MIN  150   // us
-#define OOK_PRE_HIGH_MAX  250   // us
-
 #define RX_PRE_TIMEOUT  40000   // us
 
-#define NUM_PRE_PULSES  8
 #define NUM_RX_BYTES    13
 #define NUM_RX_NIBBLES  NUM_RX_BYTES * 2
 #define NUM_RX_BITS     NUM_RX_BYTES * 8
 
-#define TMR_TICK    1.62 //us
 #define TWO_T_US    500  //us
-#define T_US        250  //us
+#define ONE_T_US    250  //us
 
-#define TWO_T_MIN   375 //2T - 0.5T
-#define TWO_T_MAX   625 //etc
-#define T_MIN       125
-#define T_MAX       375
+#define ONE_T_MIN     125
+#define ONE_T_MAX     375
+#define TWO_T_MIN     375 //2T - 0.5T
+#define TWO_T_MAX     625 //etc
+#define TWENTY_T_MIN  4500  // us
+#define TWENTY_T_MAX  5500  // us
 
 enum rx_states{
   RX_STATE_IDLE,
@@ -89,114 +84,117 @@ void loop() {
       rx_done = 0;
     }
 
-    //if(rx_err > 1){
-//      Serial.print("Err: ");
-      //Serial.println(rx_err);
-    //}
+    if(rx_err > 2){
+      Serial.print("Err: ");
+      Serial.println(rx_err);
+      rx_err = 0;
+    }
   #endif
 }
 
-// Use state machine here
-// Idle, check preamble, receive data
+
+enum pulse_width{
+  SHORT,
+  ONE_T,
+  TWO_T,
+  TWENTY_T,
+  LONG
+};
+
+struct rx_pulse {
+  pulse_width width;
+  bool        edge;
+};
+
 void interrupt_ext() {
-  volatile static int pre_counter=0, bit_counter=0, waiting=0;
+  volatile static int bit_cntr=0, waiting=0;
   volatile static unsigned long start_time=0;
-  volatile unsigned long now_time, pulse_width, timeout_counter, timeout;
-  volatile bool  edge;
+  volatile unsigned long now_time, pulse_time;
+  volatile struct rx_pulse pulse;
 
+  // Mark time and read edge immediately for best accuracy
+  now_time = micros();
+  pulse.edge = digitalRead(pin_data_in);
 
-  now_time = micros(); // Save time  and edge immediately for best accuracy
-  edge = digitalRead(pin_data_in);
-  pulse_width = now_time - start_time;
+  // Now, figure out what kind of pulse it was
+  pulse_time = now_time - start_time;
+
+  if(pulse_time < ONE_T_MIN)
+    pulse.width = SHORT;
+  else if(pulse_time <= ONE_T_MAX)
+    pulse.width = ONE_T;
+  else if(pulse_time <= TWO_T_MAX)
+    pulse.width = TWO_T;
+  else if((pulse_time > TWENTY_T_MIN) && (pulse_time <= TWENTY_T_MAX))
+    pulse.width = TWENTY_T;
+  else
+    pulse.width = LONG;
+
 
   switch(state){
 
     case RX_STATE_IDLE:
-      if(edge == HIGH){ // Received a low pulse
-        timeout_counter = 0;
-        bit_counter = 0;
+      if((pulse.width == TWENTY_T) && (pulse.edge == HIGH)){ // Received a long low pulse
+        bit_cntr = 0;
         waiting = 0;
         rx_err = 0;
-        if((pulse_width >= OOK_PRE_LOW_MIN) && (pulse_width <= OOK_PRE_LOW_MAX)){
-            timeout_counter = now_time; // Mark time from the end of first low pulse
-            state = RX_STATE_PREAMBLE;
-        }
-        else{ // Low pulse was too short
-          rx_err = 1;
-        }
+        state = RX_STATE_PREAMBLE;
+        digitalWrite(pin_led,LOW);
       }
     break;
 
     case RX_STATE_PREAMBLE:
-      if(edge == LOW){ // High-low transition
-        if((pulse_width >= TWO_T_MIN) && (pulse_width <= TWO_T_MAX)){
-          rx_data[bit_counter] = 1; // There must have been a rising edge first
-          bit_counter++;
-          rx_data[bit_counter] = 0;  // That's the falling edge we just got
-          digitalWrite(pin_debug,HIGH);
-          bit_counter++;
-          state = RX_STATE_RECEIVE;
-        }
-        else if((pulse_width < T_MIN) || (pulse_width > TWO_T_MAX)){
-          rx_err = 2;   // High pulse was too short or too long
-          state = RX_STATE_IDLE;
-        }
+      if(pulse.width == TWO_T){
+        rx_data[bit_cntr++] = !pulse.edge; // There must have been a previous edge
+        rx_data[bit_cntr++] = pulse.edge;  // That's the edge we just captured
+        state = RX_STATE_RECEIVE;
+        digitalWrite(pin_led,HIGH);
       }
-      else if(edge == HIGH){ // Low-high transition
-        if((pulse_width < OOK_PRE_LOW_MIN) || (pulse_width > OOK_PRE_LOW_MAX)){
-          rx_err = 3;   // Low pulse was too long or short
-          state = RX_STATE_IDLE;
-        }
+      else if((pulse.width == ONE_T) && (pulse.edge == LOW)){
+        // Just a normal high pulse in the preamble
+      }
+      else if((pulse.width == TWENTY_T) && (pulse.edge = HIGH)){
+        // Just a normal low pulse in the preamble
+      }
+      else{
+        rx_err = 1;
+        state = RX_STATE_IDLE;
       }
     break;
 
     case RX_STATE_RECEIVE:
-      if(edge == HIGH){
-        if(pulse_width >= OOK_PRE_LOW_MIN){
-          rx_err = 3;
-          rx_done = 1;            // If we receive a long low pulse, call it done
-          Serial.print("Err: ");
-          Serial.println(rx_err);
-          state = RX_STATE_IDLE;
-        }
-      }
-
-      if((pulse_width >= T_MIN) && (pulse_width <= T_MAX)){ // If T
-
+      if(pulse.width == ONE_T){
         if(waiting == 0){
           waiting = 1;  // Wait to capture next edge, make sure this is also T
         }
         else{
-          rx_data[bit_counter] = rx_data[bit_counter - 1];  // Bit stays the same
+          rx_data[bit_cntr] = rx_data[bit_cntr - 1];  // Repeat last bit
+          bit_cntr++;
           waiting = 0;
-          bit_counter++;
         }
       }
-      else if((pulse_width >= TWO_T_MIN) && (pulse_width <= TWO_T_MAX)){
-        if(waiting == 1){  // Only one consecutive T means an error, reset
-          rx_err = 4;
-          Serial.print("Err: ");
-          Serial.println(rx_err);
+      else if(pulse.width == TWO_T){
+        if(waiting == 1){  // Only one consecutive T shouldn't happen, reset
+          rx_err = 2;
           state = RX_STATE_IDLE;
         }
-        // 2T means the bit changes
-        if(rx_data[bit_counter - 1] == 0)
-          rx_data[bit_counter] = 1;
-        else
-          rx_data[bit_counter] = 0;
-
-        bit_counter++;
+        rx_data[bit_cntr] = rx_data[bit_cntr - 1] ^ 0b00000001; // Toggle last bit
+        bit_cntr++;
       }
-      if(bit_counter >= NUM_RX_BITS){ // Full message received
-        rx_done = 1;            // Maybe add something to protect data array against new data coming in quickly
-        digitalWrite(pin_debug,LOW);
+      else{
+        rx_err = 3;
+        state = RX_STATE_IDLE;
+      }
+
+      if(bit_cntr >= NUM_RX_BITS){ // Full message received
+        rx_done = 1;
+        // TODO: Copy array to an intermediate location for decoding
         state = RX_STATE_IDLE;
       }
     break;
   }
 
   start_time = now_time;
-
 }
 
 // Sends data to Bob's BBQ Site
